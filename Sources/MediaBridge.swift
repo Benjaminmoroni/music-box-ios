@@ -26,6 +26,9 @@ final class MediaBridge: NSObject, WKScriptMessageHandler {
     static let handlerName = "mb"
     private weak var webView: WKWebView?
     private var registered = false
+    /// Last state the page reported, so the session is reclaimed on the
+    /// paused->playing EDGE rather than on every ladder rung.
+    private var lastPlaying = false
 
     /// Persisted so the choice survives relaunch. The page owns the UI for it
     /// (Settings -> Native transport) and posts it down here.
@@ -56,6 +59,21 @@ final class MediaBridge: NSObject, WKScriptMessageHandler {
             on ? register() : unregister()
 
         case "nowplaying":
+            // THE SESSION IS RECLAIMED WHETHER OR NOT THE SWITCH IS ON, because
+            // this is not transport — it is the only signal the shell gets that
+            // playback is about to start. Measured 2026-09-07: a backgrounded
+            // resume started, ran 1.6s and then the element PAUSED ITSELF,
+            // which is what WebKit does when the session under it is dead. The
+            // interruption observer cannot cover that case: a session that went
+            // inactive without an interruption delivers no notification at all.
+            //
+            // On the false->true EDGE only. `restateSession` runs a five-rung
+            // ladder per track, so acting on every message would call setActive
+            // dozens of times a minute for nothing.
+            let playing = (body["playing"] as? Bool) ?? false
+            if playing && !lastPlaying { reclaimSession() }
+            lastPlaying = playing
+
             guard MediaBridge.enabled else { return }
             publish(body)
 
@@ -115,6 +133,31 @@ final class MediaBridge: NSObject, WKScriptMessageHandler {
             $0.removeTarget(nil); $0.isEnabled = false
         }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+    }
+
+    /// Make sure the session is ours and active before the page starts audio.
+    /// Cheap when it already is, and the failure is REPORTED rather than
+    /// swallowed — into the page's own diagnostics, since NSLog needs a Mac to
+    /// read and the only device that reproduces this is a phone.
+    private func reclaimSession() {
+        do {
+            try AVAudioSession.sharedInstance().setActive(true)
+            log("reclaimed")
+        } catch {
+            log("reclaim-failed")
+            NSLog("[MusicBox] setActive on play FAILED: \(error.localizedDescription)")
+        }
+    }
+
+    /// Write into the page's diagnostics buffer, which is the only one readable
+    /// on the device. Also the first real exercise of native->page
+    /// evaluateJavaScript while backgrounded: if these lines appear in the log,
+    /// that direction works and the transport bridge has a future; if they
+    /// never do, it does not, and that is worth knowing either way.
+    func log(_ tag: String) {
+        guard let web = webView else { return }
+        let js = "window.__mbLog && window.__mbLog('\(tag)')"
+        DispatchQueue.main.async { web.evaluateJavaScript(js, completionHandler: nil) }
     }
 
     /// Forward a command into the page. THE OPEN QUESTION IS WHETHER THIS RUNS

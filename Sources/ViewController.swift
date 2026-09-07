@@ -6,7 +6,10 @@ import WebKit
 final class ViewController: UIViewController, WKNavigationDelegate {
 
   private var webView: WKWebView!
-  private var bridge: MediaBridge!
+  // Not private: AppDelegate owns the audio session and needs to report
+  // interruption events into the page's diagnostics, which is the only log
+  // readable on the device.
+  private(set) var bridge: MediaBridge!
 
   /// Read from Info.plist so the real hostname is never committed — this repo
   /// is public. CI substitutes MBAppURL from a secret at build time.

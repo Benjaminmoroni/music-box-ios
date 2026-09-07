@@ -76,6 +76,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
       // Someone else owns the session now. Nothing to do but notice — iOS has
       // already stopped our audio, and the page's own listeners see the pause.
       NSLog("[MusicBox] audio session interrupted — another app took it")
+      logToPage("interrupted")
     case .ended:
       // RECLAIM IT UNCONDITIONALLY. This is the fix: without it the session
       // stays dead and every later play() runs into nothing.
@@ -84,6 +85,10 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         .map(AVAudioSession.InterruptionOptions.init(rawValue:)) ?? []
       NSLog("[MusicBox] audio session interruption ended — reclaimed"
             + (opts.contains(.shouldResume) ? " (iOS says we may resume)" : ""))
+      // `may-resume` vs `ended` records what iOS would have PERMITTED, so the
+      // decision not to auto-resume can be revisited against evidence instead
+      // of re-argued.
+      logToPage(opts.contains(.shouldResume) ? "ended-may-resume" : "ended")
       // DELIBERATELY NOT AUTO-RESUMING, even on .shouldResume. Restoring the
       // session makes the next press work, which is the reported failure;
       // starting music by itself in someone's pocket is a worse bug than the
@@ -99,5 +104,13 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
   @objc private func mediaServicesReset(_ note: Notification) {
     NSLog("[MusicBox] media services were reset — rebuilding the audio session")
     activateSession()
+    logToPage("services-reset")
+  }
+
+  /// NSLog needs a Mac and Console.app to read, and the only device that
+  /// reproduces any of this is a phone — so every session event also goes into
+  /// the page's own diagnostics buffer, which is readable in Settings.
+  private func logToPage(_ tag: String) {
+    (window?.rootViewController as? ViewController)?.bridge?.log(tag)
   }
 }
