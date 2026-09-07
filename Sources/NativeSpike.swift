@@ -41,6 +41,11 @@ final class NativeSpike: NSObject {
     private var player: AVPlayer?
     private var registered = false
     private var ticker: Any?
+    /// KVO is removed explicitly before anything is replaced. An observer left
+    /// on a deallocated object, or removed when it was never added, is a crash
+    /// — not a silent bug, so it is tracked rather than assumed.
+    private var observedItem: AVPlayerItem?
+    private var observingRate = false
     /// WHAT THE PAGE SAYS IS PLAYING. It rides along with the load command
     /// rather than arriving as a separate message: the page knows the track at
     /// the moment it asks for it, so sending them together is atomic with the
@@ -115,8 +120,7 @@ final class NativeSpike: NSObject {
     private func play(_ item: AVPlayerItem) {
         // A second load must REPLACE, not stack. Two AVPlayers would each hold
         // the session and both would render.
-        if let t = ticker { player?.removeTimeObserver(t); ticker = nil }
-        player?.pause()
+        teardown()
         // WE ARE THE ONLY OWNER OF THE SESSION DURING THE SPIKE. The keep-alive
         // and the play-edge reclaim were removed for exactly this reason:
         // `sess-reclaimed -> sess-interrupted` inside one second appears in four
@@ -144,6 +148,14 @@ final class NativeSpike: NSObject {
                 self?.log("spike-failed-\(e?.code ?? 0)")
             }
         item.addObserver(self, forKeyPath: "status", options: [.new], context: nil)
+        observedItem = item
+        // EXTERNALLY-DRIVEN PAUSES REPORT NOTHING OTHERWISE. A call, an alarm or
+        // a route change stops the player without any command passing through
+        // us, so the page would keep believing it was playing and the in-app
+        // glyph would go stale again — the same failure as the missing state
+        // push, arriving by a different door.
+        p.addObserver(self, forKeyPath: "timeControlStatus", options: [.new], context: nil)
+        observingRate = true
 
         // POSITION MUST COME UP. `a` is idle on this path so its currentTime
         // never moves — without ticks the progress line, the lyric highlight
@@ -171,6 +183,10 @@ final class NativeSpike: NSObject {
 
     override func observeValue(forKeyPath keyPath: String?, of object: Any?,
                                change: [NSKeyValueChangeKey: Any]?, context: UnsafeMutableRawPointer?) {
+        if keyPath == "timeControlStatus" {
+            DispatchQueue.main.async { [weak self] in self?.after(nil) }
+            return
+        }
         guard keyPath == "status", let item = object as? AVPlayerItem else { return }
         switch item.status {
         case .readyToPlay: log("spike-ready"); publish()
@@ -224,9 +240,17 @@ final class NativeSpike: NSObject {
         DispatchQueue.main.async { web.evaluateJavaScript(js, completionHandler: nil) }
     }
 
-    func stop() {
+    private func teardown() {
         if let t = ticker { player?.removeTimeObserver(t); ticker = nil }
-        player?.pause(); player = nil
+        if observingRate { player?.removeObserver(self, forKeyPath: "timeControlStatus")
+                           observingRate = false }
+        if let it = observedItem { it.removeObserver(self, forKeyPath: "status")
+                                   observedItem = nil }
+        player?.pause()
+    }
+
+    func stop() {
+        teardown(); player = nil
         unregister()
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         log("spike-stopped")
@@ -252,14 +276,35 @@ final class NativeSpike: NSObject {
             self?.log("spike-cmd-toggle")
             p.rate > 0 ? p.pause() : p.play()
             self?.after(nil); return .success }
-        [c.playCommand, c.pauseCommand, c.togglePlayPauseCommand].forEach { $0.isEnabled = true }
+        // SKIP IS THE PAGE'S DECISION. These forward into the same entry points
+        // the in-app buttons use, so shuffle, stations, recency and bans all
+        // apply — Swift never works out what is next.
+        c.nextTrackCommand.addTarget { [weak self] _ in
+            self?.log("spike-cmd-next")
+            self?.toPage("window.__mbNative && window.__mbNative.next()")
+            return .success }
+        c.previousTrackCommand.addTarget { [weak self] _ in
+            self?.log("spike-cmd-prev")
+            self?.toPage("window.__mbNative && window.__mbNative.prev()")
+            return .success }
+        // Dragging the lock screen scrubber. Seek natively, then report — the
+        // page's position comes from ticks, so without the push its progress
+        // line would snap back to where it was.
+        c.changePlaybackPositionCommand.addTarget { [weak self] e in
+            guard let ev = e as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+            self?.player?.seek(to: CMTime(seconds: ev.positionTime, preferredTimescale: 600))
+            self?.after("spike-cmd-seek")
+            return .success }
+        [c.playCommand, c.pauseCommand, c.togglePlayPauseCommand, c.nextTrackCommand,
+         c.previousTrackCommand, c.changePlaybackPositionCommand].forEach { $0.isEnabled = true }
     }
 
     private func unregister() {
         guard registered else { return }
         registered = false
         let c = MPRemoteCommandCenter.shared()
-        [c.playCommand, c.pauseCommand, c.togglePlayPauseCommand].forEach {
+        [c.playCommand, c.pauseCommand, c.togglePlayPauseCommand, c.nextTrackCommand,
+         c.previousTrackCommand, c.changePlaybackPositionCommand].forEach {
             $0.removeTarget(nil); $0.isEnabled = false }
     }
 
