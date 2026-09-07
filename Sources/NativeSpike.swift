@@ -39,6 +39,9 @@ final class NativeSpike: NSObject {
     private let log: (String) -> Void
     private var player: AVPlayer?
     private var registered = false
+    private var ticker: Any?
+    /// What the page last told us is playing, for the lock-screen entry.
+    private var meta: (title: String, artist: String) = ("Music Box", "")
 
     init(webView: WKWebView, log: @escaping (String) -> Void) {
         self.webView = webView
@@ -46,12 +49,34 @@ final class NativeSpike: NSObject {
         super.init()
     }
 
+    // MARK: - driven by the page
+
+    /// The page decides WHAT plays; this only executes it. No queue, no
+    /// ordering, no "what is next" — if a rule is ever needed it stays in the
+    /// page and is sent down, which is the line the deleted offline-shuffle
+    /// duplicate was removed for crossing.
+    func handle(_ body: [String: Any]) {
+        switch (body["cmd"] as? String) ?? "" {
+        case "load":
+            if let id = body["id"] as? Int { start(trackId: id) }
+            else if let id = body["id"] as? String, let n = Int(id) { start(trackId: n) }
+        case "play":  player?.play();  publish(); log("np-play")
+        case "pause": player?.pause(); publish(); log("np-pause")
+        case "seek":
+            if let at = body["at"] as? Double {
+                player?.seek(to: CMTime(seconds: at, preferredTimescale: 600))
+                publish()
+            }
+        default: break
+        }
+    }
+
     // MARK: - start
 
-    func start() {
+    func start(trackId: Int = NativeSpike.trackId) {
         guard let base = Bundle.main.object(forInfoDictionaryKey: "MBAppURL") as? String,
-              let url = URL(string: base.hasSuffix("/") ? "\(base)audio?id=\(NativeSpike.trackId)"
-                                                        : "\(base)/audio?id=\(NativeSpike.trackId)")
+              let url = URL(string: base.hasSuffix("/") ? "\(base)audio?id=\(trackId)"
+                                                        : "\(base)/audio?id=\(trackId)")
         else { log("spike-no-url"); return }
 
         // CLOUDFLARE ACCESS IS THE FIRST THING THAT CAN KILL THIS, and it is
@@ -73,6 +98,10 @@ final class NativeSpike: NSObject {
     }
 
     private func play(_ item: AVPlayerItem) {
+        // A second load must REPLACE, not stack. Two AVPlayers would each hold
+        // the session and both would render.
+        if let t = ticker { player?.removeTimeObserver(t); ticker = nil }
+        player?.pause()
         // WE ARE THE ONLY OWNER OF THE SESSION DURING THE SPIKE. The keep-alive
         // and the play-edge reclaim were removed for exactly this reason:
         // `sess-reclaimed -> sess-interrupted` inside one second appears in four
@@ -101,6 +130,25 @@ final class NativeSpike: NSObject {
             }
         item.addObserver(self, forKeyPath: "status", options: [.new], context: nil)
 
+        // POSITION MUST COME UP. `a` is idle on this path so its currentTime
+        // never moves — without ticks the progress line, the lyric highlight
+        // and the /played beacon would all freeze while music played perfectly,
+        // which is the exact shape of failure this project keeps recording.
+        // 4 Hz: enough for a lyric line, cheap enough to ignore.
+        ticker = p.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
+            queue: .main) { [weak self] t in
+                guard let self = self, let item = self.player?.currentItem else { return }
+                let d = item.duration.isNumeric ? CMTimeGetSeconds(item.duration) : 0
+                self.toPage("window.__mbTick(\(CMTimeGetSeconds(t)),\(d),"
+                            + "\((self.player?.rate ?? 0) > 0))")
+            }
+        NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+                // The advance is the page's decision, not ours.
+                self?.log("np-end"); self?.toPage("window.__mbEnded()")
+            }
+
         p.play()
         publish()
         log("spike-started")
@@ -116,7 +164,13 @@ final class NativeSpike: NSObject {
         }
     }
 
+    private func toPage(_ js: String) {
+        guard let web = webView else { return }
+        DispatchQueue.main.async { web.evaluateJavaScript(js, completionHandler: nil) }
+    }
+
     func stop() {
+        if let t = ticker { player?.removeTimeObserver(t); ticker = nil }
         player?.pause(); player = nil
         unregister()
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil

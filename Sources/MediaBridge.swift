@@ -64,6 +64,11 @@ final class MediaBridge: NSObject, WKScriptMessageHandler {
         return s
     }
 
+    private func log2page(_ js: String) {
+        guard let web = webView else { return }
+        DispatchQueue.main.async { web.evaluateJavaScript(js, completionHandler: nil) }
+    }
+
     private func notifySpikeChanged() {
         DispatchQueue.main.async { [weak self] in self?.onSpikeChanged?() }
     }
@@ -76,6 +81,12 @@ final class MediaBridge: NSObject, WKScriptMessageHandler {
               let type = body["type"] as? String else { return }
 
         switch type {
+        case "np":
+            // Native playback commands from the page. Created on demand so
+            // nothing exists until the switch is on.
+            guard NativeSpike.enabled else { return }
+            spikePlayer().handle(body)
+
         case "spike":
             // Phase 0 of native playback. Off by default and owned by the page,
             // like every other shell switch.
@@ -83,6 +94,10 @@ final class MediaBridge: NSObject, WKScriptMessageHandler {
             NativeSpike.enabled = on
             if !on { spike?.stop(); spike = nil }
             notifySpikeChanged()
+            // Tell the page which engine it is driving. It defaults to the web
+            // element, so a shell that never answers behaves exactly like the
+            // PWA rather than silently playing nothing.
+            log2page("window.__mbPlayback(\(on))")
 
         case "transport":
             // The page's Settings toggle. Applying it live means no relaunch to
