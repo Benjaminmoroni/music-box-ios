@@ -227,9 +227,23 @@ final class MediaBridge: NSObject, WKScriptMessageHandler {
             // has to actually render for iOS to count us as playing.
             let p = try AVAudioPlayer(data: MediaBridge.silence())
             p.numberOfLoops = -1
-            p.play()
-            keepAlive = p
-            log("holding")
+            p.prepareToPlay()
+            // CHECK THE RETURN. `play()` hands back a Bool and does NOT throw,
+            // so discarding it logged "holding" whether or not a single sample
+            // was ever rendered — and on 2026-09-07 the session still lapsed at
+            // exactly 20s with `sess-holding` sitting in the log claiming
+            // otherwise. That is this project's own rule fired against itself:
+            // an instrument that cannot say "I was blocked" says "no data".
+            if p.play() {
+                keepAlive = p
+                log("holding")
+            } else {
+                // Almost certainly the same wall as `cannot-interrupt`: a
+                // backgrounded app with a non-mixable session is not permitted
+                // to START audio. If this is what appears, silence cannot hold
+                // the session either and the approach is finished, not tunable.
+                log("hold-refused")
+            }
         } catch let e as NSError {
             log("hold-" + MediaBridge.reason(e.code))
             NSLog("[MusicBox] keep-alive FAILED (\(e.code)): \(e.localizedDescription)")
