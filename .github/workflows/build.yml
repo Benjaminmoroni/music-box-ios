@@ -99,6 +99,16 @@ jobs:
           [ -f "$APPDIR/AppIcon60x60@2x.png" ] || [ -n "$icon" ] \
             || { echo "::error::no app icon in the built product — the asset catalog was compiled but not used"; fail=1; }
           echo "app icon: ${icon:-$(ls "$APPDIR" | grep -c '^AppIcon') file(s)}"
+          # THE SAME MECHANISM DROPPED THE LAUNCH SCREEN. XcodeGen's `resources:`
+          # key does not exist and was ignored, so there was no actool AND no
+          # ibtool step — the icon check caught its half, nothing watched this
+          # one, and Info.plist still named a storyboard that was not in the
+          # bundle. Assert every declared resource actually arrived.
+          [ -d "$APPDIR/LaunchScreen.storyboardc" ] \
+            || { echo "::error::LaunchScreen.storyboardc missing — UILaunchStoryboardName names a storyboard the bundle does not contain"; fail=1; }
+          [ -f "$APPDIR/Assets.car" ] \
+            || { echo "::error::Assets.car missing — the asset catalog is not in the product at all"; fail=1; }
+          echo "resources: $(ls "$APPDIR" | tr '\n' ' ')"
           exit $fail
 
       - uses: actions/upload-artifact@v4

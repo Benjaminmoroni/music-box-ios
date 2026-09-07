@@ -10,8 +10,17 @@ targets:
   MusicBox:
     type: application
     platform: iOS
-    sources: [Sources]
-    resources: [Resources/LaunchScreen.storyboard, Resources/Assets.xcassets]
+    # XcodeGen has NO `resources:` key — resources are declared as SOURCES and
+    # it picks the build phase from the file type (.xcassets/.storyboard land in
+    # Resources). A `resources:` key is accepted silently and IGNORED, which is
+    # how the app shipped with no icon AND no launch screen while the build
+    # stayed green: there was no actool or ibtool step at all. Listed file by
+    # file rather than as the whole `Resources` dir, because XcodeGen generates
+    # Info.plist in there and it must not also be copied into the bundle.
+    sources:
+      - Sources
+      - Resources/LaunchScreen.storyboard
+      - Resources/Assets.xcassets
     # THE KEYS LIVE HERE, NOT IN A HAND-WRITTEN Info.plist. XcodeGen GENERATES
     # the file at `path`, overwriting anything already there — so a hand-written
     # plist is silently discarded and the app ships without its entitlement.
