@@ -26,44 +26,17 @@ final class MediaBridge: NSObject, WKScriptMessageHandler {
     static let handlerName = "mb"
     private weak var webView: WKWebView?
     private var registered = false
-    /// Last state the page reported, so the session is reclaimed on the
-    /// paused->playing EDGE rather than on every ladder rung.
-    private var lastPlaying = false
 
-    /// WE GIVE THE SESSION UP; NOBODY TAKES IT (Ben, 2026-09-07).
-    ///
-    /// That correction is what this exists for. Measured: with a real pause we
-    /// release and another app has the slot within seconds — five
-    /// `sess-interrupted` in eight. With the hold we release nothing and NOTHING
-    /// interrupts us at all, yet resume still dies somewhere between 20 and 27
-    /// seconds. **A steal announces itself and that one never did**, so the
-    /// ceiling is not a rogue app; the session simply lapses under us because
-    /// `playbackRate = 0` renders NO SAMPLES and iOS reclaims a session nobody
-    /// is using.
-    ///
-    /// The page already tried to fix this at its own layer and could not:
-    /// mute-hold kept `rate 1` and muted, and lapsed identically, because
-    /// WebKit does not count a muted element as playing audio either. The shell
-    /// can do what the page cannot — render REAL silence through our own
-    /// session, which iOS does count.
-    private var keepAlive: AVAudioPlayer?
-    private var release: DispatchWorkItem?
-
-    /// Bounded, and the bound is the point (Ben): "give it a few minutes of
-    /// holding onto the session (maybe 5), and then ACTIVELY release it so that
-    /// it is clear that music-box is no longer resumable from the lock screen."
-    ///
-    /// Holding forever would make us the app everyone else's audio has to fight
-    /// — precisely the rudeness this whole investigation has been complaining
-    /// about from the other side. And an unbounded hold has no honest end
-    /// state: the widget keeps offering a play button that does nothing. A
-    /// deliberate release ends it cleanly instead of decaying into a lie.
-    private static let holdWindow: TimeInterval = 300
-
-    static var keepAliveEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: "MBHoldSession") }
-        set { UserDefaults.standard.set(newValue, forKey: "MBHoldSession") }
-    }
+    /// THE SILENT KEEP-ALIVE WAS REMOVED (2026-09-07), measured, not guessed.
+    /// `AVAudioPlayer.play()` was REFUSED while backgrounded; started legally on
+    /// the play edge it ran about one second before an interruption killed it.
+    /// And `sess-reclaimed -> sess-interrupted` inside the same second appears
+    /// in four separate logs: one AVAudioSession per process, and WebKit is
+    /// already its owner while it plays the element. Our reclaim was at best
+    /// inert and at worst the thing generating those interruptions, so both it
+    /// and the keep-alive are gone. The interruption OBSERVER stays — handling
+    /// interruptions is a standard requirement, and it costs nothing.
+    private var spike: NativeSpike?
 
     /// Persisted so the choice survives relaunch. The page owns the UI for it
     /// (Settings -> Native transport) and posts it down here.
@@ -72,10 +45,27 @@ final class MediaBridge: NSObject, WKScriptMessageHandler {
         set { UserDefaults.standard.set(newValue, forKey: "MBNativeTransport") }
     }
 
+    /// Called when the spike switch flips, so the view controller can show or
+    /// hide its button without polling.
+    var onSpikeChanged: (() -> Void)?
+
     init(webView: WKWebView) {
         self.webView = webView
         super.init()
         if MediaBridge.enabled { register() }
+    }
+
+    /// The spike is created lazily and owned here, because this is the object
+    /// that already holds the web view the cookies have to come from.
+    func spikePlayer() -> NativeSpike {
+        if let s = spike { return s }
+        let s = NativeSpike(webView: webView!, log: { [weak self] in self?.log($0) })
+        spike = s
+        return s
+    }
+
+    private func notifySpikeChanged() {
+        DispatchQueue.main.async { [weak self] in self?.onSpikeChanged?() }
     }
 
     // MARK: - messages from the page
@@ -86,10 +76,13 @@ final class MediaBridge: NSObject, WKScriptMessageHandler {
               let type = body["type"] as? String else { return }
 
         switch type {
-        case "keepalive":
+        case "spike":
+            // Phase 0 of native playback. Off by default and owned by the page,
+            // like every other shell switch.
             let on = (body["enabled"] as? Bool) ?? false
-            MediaBridge.keepAliveEnabled = on
-            if !on { stopHolding() }
+            NativeSpike.enabled = on
+            if !on { spike?.stop(); spike = nil }
+            notifySpikeChanged()
 
         case "transport":
             // The page's Settings toggle. Applying it live means no relaunch to
@@ -99,46 +92,10 @@ final class MediaBridge: NSObject, WKScriptMessageHandler {
             on ? register() : unregister()
 
         case "nowplaying":
-            // THE SESSION IS RECLAIMED WHETHER OR NOT THE SWITCH IS ON, because
-            // this is not transport — it is the only signal the shell gets that
-            // playback is about to start. Measured 2026-09-07: a backgrounded
-            // resume started, ran 1.6s and then the element PAUSED ITSELF,
-            // which is what WebKit does when the session under it is dead. The
-            // interruption observer cannot cover that case: a session that went
-            // inactive without an interruption delivers no notification at all.
-            //
-            // On the false->true EDGE only. `restateSession` runs a five-rung
-            // ladder per track, so acting on every message would call setActive
-            // dozens of times a minute for nothing.
-            let playing = (body["playing"] as? Bool) ?? false
-            if playing != lastPlaying {
-                if playing {
-                    // START THE SILENCE HERE, NOT ON THE PAUSE EDGE.
-                    //
-                    // The first version started it when the page reported
-                    // PAUSED — which by definition happens while the phone is
-                    // locked, and a backgrounded app may not start audio.
-                    // Measured 2026-09-07: `sess-hold-refused` in the same
-                    // second as the hold, while the very same call succeeded
-                    // foregrounded eight seconds later. The mechanism was right
-                    // and the moment was wrong.
-                    //
-                    // A play edge is the moment we are ALLOWED: the user just
-                    // pressed play in the app. Started here the silent player
-                    // is already running when the screen locks, so it never has
-                    // to start in the background at all — which is the whole
-                    // point, and the form this technique normally takes.
-                    cancelRelease()
-                    startHolding()
-                    reclaimSession()
-                } else {
-                    // Silence keeps running; only the countdown starts. Nothing
-                    // is STARTED here, which is what makes it legal.
-                    scheduleRelease()
-                }
-            }
-            lastPlaying = playing
-
+            // PUBLISHING ONLY. Nothing here touches the audio session any more
+            // — see the note on `spike` above. The page reports state; the
+            // shell reflects it to the lock screen when the transport switch
+            // is on, and otherwise ignores it.
             guard MediaBridge.enabled else { return }
             publish(body)
 
@@ -200,19 +157,6 @@ final class MediaBridge: NSObject, WKScriptMessageHandler {
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
     }
 
-    /// Make sure the session is ours and active before the page starts audio.
-    /// Cheap when it already is, and the failure is REPORTED rather than
-    /// swallowed — into the page's own diagnostics, since NSLog needs a Mac to
-    /// read and the only device that reproduces this is a phone.
-    private func reclaimSession() {
-        do {
-            try AVAudioSession.sharedInstance().setActive(true)
-            log("reclaimed")
-        } catch let e as NSError {
-            log("reclaim-" + MediaBridge.reason(e.code))
-            NSLog("[MusicBox] setActive on play FAILED (\(e.code)): \(e.localizedDescription)")
-        }
-    }
 
     /// AVAudioSession errors are OSStatus four-character codes, and a bare
     /// number is unreadable on the one screen that can show it. Only the ones
@@ -237,101 +181,11 @@ final class MediaBridge: NSObject, WKScriptMessageHandler {
 
     // MARK: - holding the session across a pause
 
-    private func startHolding() {
-        guard MediaBridge.keepAliveEnabled, keepAlive == nil else { return }
-        do {
-            // Zero-amplitude SAMPLES, not volume 0 and not muted — the
-            // distinction is the whole lesson from mute-hold. The audio unit
-            // has to actually render for iOS to count us as playing.
-            let p = try AVAudioPlayer(data: MediaBridge.silence())
-            p.numberOfLoops = -1
-            p.prepareToPlay()
-            // CHECK THE RETURN. `play()` hands back a Bool and does NOT throw,
-            // so discarding it logged "holding" whether or not a single sample
-            // was ever rendered — and on 2026-09-07 the session still lapsed at
-            // exactly 20s with `sess-holding` sitting in the log claiming
-            // otherwise. That is this project's own rule fired against itself:
-            // an instrument that cannot say "I was blocked" says "no data".
-            if p.play() {
-                keepAlive = p
-                log("holding")
-            } else {
-                // Almost certainly the same wall as `cannot-interrupt`: a
-                // backgrounded app with a non-mixable session is not permitted
-                // to START audio. If this is what appears, silence cannot hold
-                // the session either and the approach is finished, not tunable.
-                log("hold-refused")
-            }
-        } catch let e as NSError {
-            log("hold-" + MediaBridge.reason(e.code))
-            NSLog("[MusicBox] keep-alive FAILED (\(e.code)): \(e.localizedDescription)")
-        }
-    }
 
-    /// The bound runs from the PAUSE, not from the play — five minutes of being
-    /// resumable, then an honest end.
-    private func scheduleRelease() {
-        release?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.releaseSession() }
-        release = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + MediaBridge.holdWindow,
-                                      execute: work)
-    }
 
-    private func cancelRelease() {
-        release?.cancel(); release = nil
-    }
 
-    private func stopHolding() {
-        release?.cancel(); release = nil
-        guard keepAlive != nil else { return }
-        keepAlive?.stop(); keepAlive = nil
-        log("hold-ended")
-    }
 
-    /// The honest end of the window. Deactivating with
-    /// `.notifyOthersOnDeactivation` is what tells iOS and every other app that
-    /// we are done, so the lock screen stops offering a Music Box that cannot
-    /// come back — and the page is told too, so its own state stops claiming a
-    /// hold it no longer has.
-    private func releaseSession() {
-        release = nil
-        keepAlive?.stop(); keepAlive = nil
-        do {
-            try AVAudioSession.sharedInstance()
-                .setActive(false, options: .notifyOthersOnDeactivation)
-            log("released")
-        } catch let e as NSError {
-            log("release-" + MediaBridge.reason(e.code))
-        }
-        guard let web = webView else { return }
-        DispatchQueue.main.async {
-            web.evaluateJavaScript("window.__mbRelease && window.__mbRelease()",
-                                   completionHandler: nil)
-        }
-    }
 
-    /// One second of PCM zeroes, looped. Built rather than shipped as a
-    /// resource: a silent WAV is a header and a run of zeroes, and a binary
-    /// asset for that is one more thing the build can silently drop — which
-    /// this project has already been bitten by once.
-    private static func silence(seconds: Double = 1, rate: Int = 44_100) -> Data {
-        let frames = Int(Double(rate) * seconds)
-        let bytes = frames * 2                       // mono, 16-bit
-        func le(_ v: Int, _ n: Int) -> Data {
-            var x = UInt32(v).littleEndian
-            return Data(bytes: &x, count: n)
-        }
-        var d = Data("RIFF".utf8)
-        d.append(le(36 + bytes, 4)); d.append(Data("WAVEfmt ".utf8))
-        d.append(le(16, 4))                          // fmt chunk size
-        d.append(le(1, 2)); d.append(le(1, 2))       // PCM, mono
-        d.append(le(rate, 4)); d.append(le(rate * 2, 4))
-        d.append(le(2, 2)); d.append(le(16, 2))      // block align, bits
-        d.append(Data("data".utf8)); d.append(le(bytes, 4))
-        d.append(Data(count: bytes))
-        return d
-    }
 
     /// Write into the page's diagnostics buffer, which is the only one readable
     /// on the device. Also the first real exercise of native->page

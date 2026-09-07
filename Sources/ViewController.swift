@@ -51,6 +51,12 @@ final class ViewController: UIViewController, WKNavigationDelegate {
     // on, and registers nothing at all when it is off — see MediaBridge.swift.
     bridge = MediaBridge(webView: webView)
     cfg.userContentController.add(bridge, name: MediaBridge.handlerName)
+
+    // PHASE 0 CONTROL. A native button, because the spike must not depend on
+    // anything in the web view — the whole point is that nothing in WebKit is
+    // playing while it runs. Hidden unless the page's switch turned it on, so
+    // it cannot sit on top of the real UI by accident.
+    bridge.onSpikeChanged = { [weak self] in self?.updateSpikeButton() }
     webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
     webView.navigationDelegate = self
     webView.allowsBackForwardNavigationGestures = true
@@ -109,5 +115,37 @@ final class ViewController: UIViewController, WKNavigationDelegate {
     label.text = message
     label.autoresizingMask = [.flexibleWidth, .flexibleHeight]
     view.addSubview(label)
+  }
+
+  private var spikeButton: UIButton?
+
+  /// Deliberately ugly and deliberately in the way when it is on: a spike
+  /// control that blends in is one that gets left in the shipped app.
+  private func updateSpikeButton() {
+    if !NativeSpike.enabled {
+      spikeButton?.removeFromSuperview(); spikeButton = nil
+      return
+    }
+    guard spikeButton == nil, let root = view else { return }
+    let b = UIButton(type: .system)
+    b.setTitle("SPIKE ▶", for: .normal)
+    b.titleLabel?.font = .monospacedDigitSystemFont(ofSize: 13, weight: .bold)
+    b.backgroundColor = UIColor.systemRed.withAlphaComponent(0.85)
+    b.setTitleColor(.white, for: .normal)
+    b.layer.cornerRadius = 6
+    b.translatesAutoresizingMaskIntoConstraints = false
+    b.addTarget(self, action: #selector(startSpike), for: .touchUpInside)
+    root.addSubview(b)
+    NSLayoutConstraint.activate([
+      b.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor, constant: 4),
+      b.trailingAnchor.constraint(equalTo: root.safeAreaLayoutGuide.trailingAnchor, constant: -8),
+      b.heightAnchor.constraint(equalToConstant: 30),
+      b.widthAnchor.constraint(equalToConstant: 84),
+    ])
+    spikeButton = b
+  }
+
+  @objc private func startSpike() {
+    bridge.spikePlayer().start()
   }
 }
