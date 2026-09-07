@@ -16,12 +16,21 @@ on:
 
 jobs:
   ipa:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
       - name: Install XcodeGen
         run: brew install xcodegen
+
+      - name: Report the toolchain
+        # PRINT THE VERSIONS. The first build failed because brew's XcodeGen
+        # emits project format 77 and the macos-14 image ships Xcode 15.4, which
+        # cannot read it — an error that says nothing about either version
+        # unless you go looking. This makes the next mismatch obvious.
+        run: |
+          xcodebuild -version
+          xcodegen --version
 
       - name: Point the app at the real site
         # The repo is public, so the hostname lives in a secret rather than in
