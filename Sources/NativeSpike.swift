@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import UIKit
 import MediaPlayer
 import WebKit
 
@@ -40,8 +41,17 @@ final class NativeSpike: NSObject {
     private var player: AVPlayer?
     private var registered = false
     private var ticker: Any?
-    /// What the page last told us is playing, for the lock-screen entry.
-    private var meta: (title: String, artist: String) = ("Music Box", "")
+    /// WHAT THE PAGE SAYS IS PLAYING. It rides along with the load command
+    /// rather than arriving as a separate message: the page knows the track at
+    /// the moment it asks for it, so sending them together is atomic with the
+    /// track change and cannot race it. Phase 0 hardcoded "Native spike" here
+    /// and the lock screen dutifully said that for every song.
+    private var meta: [String: Any] = [:]
+    private var artwork: MPMediaItemArtwork?
+    /// Captured with the asset's cookies so artwork can be fetched through
+    /// Cloudflare Access too — a bare request comes back as a login page, which
+    /// decodes to no image and looks exactly like "this track has no art".
+    private var cookieHeader = ""
 
     init(webView: WKWebView, log: @escaping (String) -> Void) {
         self.webView = webView
@@ -58,8 +68,11 @@ final class NativeSpike: NSObject {
     func handle(_ body: [String: Any]) {
         switch (body["cmd"] as? String) ?? "" {
         case "load":
-            if let id = body["id"] as? Int { start(trackId: id) }
-            else if let id = body["id"] as? String, let n = Int(id) { start(trackId: n) }
+            meta = body
+            artwork = nil          // never show the previous track's cover
+            let raw = body["id"]
+            let id = (raw as? Int) ?? Int((raw as? String) ?? "") ?? 0
+            if id > 0 { start(trackId: id) }
         case "play":  player?.play();  after("np-play")
         case "pause": player?.pause(); after("np-pause")
         case "seek":
@@ -92,6 +105,8 @@ final class NativeSpike: NSObject {
             let mine = jar.filter { host.hasSuffix($0.domain.hasPrefix(".") ? String($0.domain.dropFirst())
                                                                            : $0.domain) }
             self.log("spike-cookies-\(mine.count)")
+            self.cookieHeader = mine.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+            self.loadArt(base: base, trackId: trackId)
             let asset = AVURLAsset(url: url, options: [AVURLAssetHTTPCookiesKey: mine])
             self.play(AVPlayerItem(asset: asset))
         }
@@ -185,6 +200,25 @@ final class NativeSpike: NSObject {
         toPage("window.__mbTick(\(CMTimeGetSeconds(p.currentTime())),\(d),\(p.rate > 0))")
     }
 
+    /// Fetch the cover for the lock screen. Failure is SILENT by nature — a
+    /// missing image just looks like a track without art — so every outcome is
+    /// logged, including the one that matters: an Access redirect arrives as a
+    /// perfectly valid HTTP 200 of HTML that simply is not an image.
+    private func loadArt(base: String, trackId: Int) {
+        let sep = base.hasSuffix("/") ? "" : "/"
+        guard let url = URL(string: "\(base)\(sep)art?id=\(trackId)") else { return }
+        var req = URLRequest(url: url)
+        if !cookieHeader.isEmpty { req.setValue(cookieHeader, forHTTPHeaderField: "Cookie") }
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, err in
+            guard let self = self else { return }
+            guard let d = data, let img = UIImage(data: d) else {
+                self.log(err == nil ? "art-not-an-image" : "art-failed"); return
+            }
+            self.artwork = MPMediaItemArtwork(boundsSize: img.size) { _ in img }
+            DispatchQueue.main.async { self.publish() }
+        }.resume()
+    }
+
     private func toPage(_ js: String) {
         guard let web = webView else { return }
         DispatchQueue.main.async { web.evaluateJavaScript(js, completionHandler: nil) }
@@ -234,9 +268,13 @@ final class NativeSpike: NSObject {
     /// already chased once from the web side.
     private func publish() {
         var info: [String: Any] = [
-            MPMediaItemPropertyTitle: "Native spike",
-            MPMediaItemPropertyArtist: "Music Box",
+            MPMediaItemPropertyTitle: (meta["title"] as? String) ?? "",
+            MPMediaItemPropertyArtist: (meta["artist"] as? String) ?? "",
         ]
+        if let album = meta["album"] as? String, !album.isEmpty {
+            info[MPMediaItemPropertyAlbumTitle] = album
+        }
+        if let art = artwork { info[MPMediaItemPropertyArtwork] = art }
         if let d = player?.currentItem?.duration, d.isNumeric {
             info[MPMediaItemPropertyPlaybackDuration] = CMTimeGetSeconds(d)
         }
