@@ -32,6 +32,9 @@ jobs:
           xcodebuild -version
           xcodegen --version
 
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
       - name: Point the app at the real site
         # The repo is public, so the hostname lives in a secret rather than in
         # Info.plist. Without it the app builds and then says so on screen,
@@ -45,9 +48,6 @@ jobs:
             /usr/libexec/PlistBuddy -c "Set :MBAppURL $MB_APP_URL" Resources/Info.plist
             echo "::notice::MBAppURL set from secret (value not printed)"
           fi
-
-      - name: Generate the Xcode project
-        run: xcodegen generate
 
       - name: Archive (no code signing)
         run: |
@@ -68,6 +68,29 @@ jobs:
           cp -R build/MusicBox.xcarchive/Products/Applications/MusicBox.app Payload/
           zip -qry MusicBox-unsigned.ipa Payload
           ls -lh MusicBox-unsigned.ipa
+
+      - name: Verify the built app is not useless
+        # THE FIRST BUILD "SUCCEEDED" AND SHIPPED AN APP WITH NO
+        # UIBackgroundModes. XcodeGen regenerates Info.plist, so a hand-written
+        # one is discarded and a substitution made before `generate` is wiped —
+        # neither of which fails anything. A green build that produces an app
+        # missing its only feature is worse than a red one, so assert against
+        # the BUILT product rather than the source.
+        run: |
+          APP=build/MusicBox.xcarchive/Products/Applications/MusicBox.app/Info.plist
+          modes=$(/usr/libexec/PlistBuddy -c "Print :UIBackgroundModes:0" "$APP" 2>/dev/null || true)
+          url=$(/usr/libexec/PlistBuddy -c "Print :MBAppURL" "$APP" 2>/dev/null || true)
+          hosts=$(/usr/libexec/PlistBuddy -c "Print :MBAllowedHostSuffixes:0" "$APP" 2>/dev/null || true)
+          echo "UIBackgroundModes[0] = ${modes:-<MISSING>}"
+          echo "MBAllowedHostSuffixes[0] = ${hosts:-<MISSING>}"
+          echo "MBAppURL is ${url:+set}${url:-<MISSING>}"   # value never printed
+          fail=0
+          [ "$modes" = "audio" ] || { echo "::error::UIBackgroundModes:audio is missing — the app cannot play in the background, which is the only reason it exists"; fail=1; }
+          [ "$hosts" = "cloudflareaccess.com" ] || { echo "::error::MBAllowedHostSuffixes is missing — Cloudflare Access login would dead-end"; fail=1; }
+          case "$url" in
+            ""|*example.invalid*) echo "::error::MBAppURL was not substituted — the app has no site to load"; fail=1;;
+          esac
+          exit $fail
 
       - uses: actions/upload-artifact@v4
         with:

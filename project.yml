@@ -12,8 +12,25 @@ targets:
     platform: iOS
     sources: [Sources]
     resources: [Resources/LaunchScreen.storyboard]
+    # THE KEYS LIVE HERE, NOT IN A HAND-WRITTEN Info.plist. XcodeGen GENERATES
+    # the file at `path`, overwriting anything already there — so a hand-written
+    # plist is silently discarded and the app ships without its entitlement.
+    # The first build did exactly that: it succeeded, produced an .ipa, and
+    # UIBackgroundModes was absent from the result.
     info:
       path: Resources/Info.plist
+      properties:
+        # The entire reason this app exists.
+        UIBackgroundModes: [audio]
+        # Placeholder — CI substitutes it from MB_APP_URL AFTER generating.
+        MBAppURL: https://example.invalid/
+        # Access one-time-PIN login redirects off our origin and back.
+        MBAllowedHostSuffixes: [cloudflareaccess.com]
+        CFBundleDisplayName: Music Box
+        UILaunchStoryboardName: LaunchScreen
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.github.benjaminmoroni.musicbox
