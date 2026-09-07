@@ -113,10 +113,28 @@ final class MediaBridge: NSObject, WKScriptMessageHandler {
             let playing = (body["playing"] as? Bool) ?? false
             if playing != lastPlaying {
                 if playing {
-                    stopHolding()      // real audio is coming; silence is done
+                    // START THE SILENCE HERE, NOT ON THE PAUSE EDGE.
+                    //
+                    // The first version started it when the page reported
+                    // PAUSED — which by definition happens while the phone is
+                    // locked, and a backgrounded app may not start audio.
+                    // Measured 2026-09-07: `sess-hold-refused` in the same
+                    // second as the hold, while the very same call succeeded
+                    // foregrounded eight seconds later. The mechanism was right
+                    // and the moment was wrong.
+                    //
+                    // A play edge is the moment we are ALLOWED: the user just
+                    // pressed play in the app. Started here the silent player
+                    // is already running when the screen locks, so it never has
+                    // to start in the background at all — which is the whole
+                    // point, and the form this technique normally takes.
+                    cancelRelease()
+                    startHolding()
                     reclaimSession()
                 } else {
-                    startHolding()     // paused: keep the session genuinely busy
+                    // Silence keeps running; only the countdown starts. Nothing
+                    // is STARTED here, which is what makes it legal.
+                    scheduleRelease()
                 }
             }
             lastPlaying = playing
@@ -248,10 +266,20 @@ final class MediaBridge: NSObject, WKScriptMessageHandler {
             log("hold-" + MediaBridge.reason(e.code))
             NSLog("[MusicBox] keep-alive FAILED (\(e.code)): \(e.localizedDescription)")
         }
+    }
+
+    /// The bound runs from the PAUSE, not from the play — five minutes of being
+    /// resumable, then an honest end.
+    private func scheduleRelease() {
+        release?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.releaseSession() }
         release = work
         DispatchQueue.main.asyncAfter(deadline: .now() + MediaBridge.holdWindow,
                                       execute: work)
+    }
+
+    private func cancelRelease() {
+        release?.cancel(); release = nil
     }
 
     private func stopHolding() {
