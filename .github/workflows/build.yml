@@ -90,6 +90,15 @@ jobs:
           case "$url" in
             ""|*example.invalid*) echo "::error::MBAppURL was not substituted — the app has no site to load"; fail=1;;
           esac
+          # THE ICON COMPILES WHETHER OR NOT IT IS USED. Without
+          # ASSETCATALOG_COMPILER_APPICON_NAME the catalog builds fine and the
+          # app still ships the grey placeholder — green build, no icon, which
+          # is exactly how UIBackgroundModes went missing the first time.
+          APPDIR=$(dirname "$APP")
+          icon=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:0" "$APP" 2>/dev/null || true)
+          [ -f "$APPDIR/AppIcon60x60@2x.png" ] || [ -n "$icon" ] \
+            || { echo "::error::no app icon in the built product — the asset catalog was compiled but not used"; fail=1; }
+          echo "app icon: ${icon:-$(ls "$APPDIR" | grep -c '^AppIcon') file(s)}"
           exit $fail
 
       - uses: actions/upload-artifact@v4

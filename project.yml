@@ -11,7 +11,7 @@ targets:
     type: application
     platform: iOS
     sources: [Sources]
-    resources: [Resources/LaunchScreen.storyboard]
+    resources: [Resources/LaunchScreen.storyboard, Resources/Assets.xcassets]
     # THE KEYS LIVE HERE, NOT IN A HAND-WRITTEN Info.plist. XcodeGen GENERATES
     # the file at `path`, overwriting anything already there — so a hand-written
     # plist is silently discarded and the app ships without its entitlement.
@@ -38,3 +38,6 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "1"
         INFOPLIST_KEY_UILaunchStoryboardName: LaunchScreen
+        # Without this the asset catalog is compiled but never USED, and the app
+        # ships with the grey placeholder icon while the build stays green.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

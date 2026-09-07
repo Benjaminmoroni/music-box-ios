@@ -6,6 +6,7 @@ import WebKit
 final class ViewController: UIViewController, WKNavigationDelegate {
 
   private var webView: WKWebView!
+  private var bridge: MediaBridge!
 
   /// Read from Info.plist so the real hostname is never committed — this repo
   /// is public. CI substitutes MBAppURL from a secret at build time.
@@ -34,7 +35,19 @@ final class ViewController: UIViewController, WKNavigationDelegate {
     // logging in on every launch and re-downloading everything.
     cfg.websiteDataStore = .default()
 
+    // TELL THE PAGE IT IS IN THE SHELL, at document start so it can decide
+    // before it wires anything. Without this the web app cannot know whether
+    // the native transport exists, and would have to guess from the user agent.
+    let flag = WKUserScript(
+      source: "window.__MB_NATIVE_SHELL = true;",
+      injectionTime: .atDocumentStart, forMainFrameOnly: true)
+    cfg.userContentController.addUserScript(flag)
+
     webView = WKWebView(frame: view.bounds, configuration: cfg)
+    // The bridge owns the lock screen / headphone transport when its switch is
+    // on, and registers nothing at all when it is off — see MediaBridge.swift.
+    bridge = MediaBridge(webView: webView)
+    cfg.userContentController.add(bridge, name: MediaBridge.handlerName)
     webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
     webView.navigationDelegate = self
     webView.allowsBackForwardNavigationGestures = true
