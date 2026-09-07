@@ -60,12 +60,12 @@ final class NativeSpike: NSObject {
         case "load":
             if let id = body["id"] as? Int { start(trackId: id) }
             else if let id = body["id"] as? String, let n = Int(id) { start(trackId: n) }
-        case "play":  player?.play();  publish(); log("np-play")
-        case "pause": player?.pause(); publish(); log("np-pause")
+        case "play":  player?.play();  after("np-play")
+        case "pause": player?.pause(); after("np-pause")
         case "seek":
             if let at = body["at"] as? Double {
                 player?.seek(to: CMTime(seconds: at, preferredTimescale: 600))
-                publish()
+                after(nil)
             }
         default: break
         }
@@ -164,6 +164,27 @@ final class NativeSpike: NSObject {
         }
     }
 
+    /// PUSH THE STATE AFTER EVERY COMMAND. The periodic observer only fires
+    /// while the player is PLAYING, so a pause produced no tick and the page's
+    /// idea of `playing` stayed true forever — the in-app button lagged and
+    /// then stopped moving, while tapping it still worked. Position ticks are
+    /// not a state channel; this is.
+    ///
+    /// It also covers the lock screen: a press there reaches the remote handler
+    /// and never touched the page, so the in-app glyph had no way to learn
+    /// about it either.
+    private func after(_ tag: String?) {
+        publish()
+        pushState()
+        if let t = tag { log(t) }
+    }
+
+    private func pushState() {
+        guard let p = player, let item = p.currentItem else { return }
+        let d = item.duration.isNumeric ? CMTimeGetSeconds(item.duration) : 0
+        toPage("window.__mbTick(\(CMTimeGetSeconds(p.currentTime())),\(d),\(p.rate > 0))")
+    }
+
     private func toPage(_ js: String) {
         guard let web = webView else { return }
         DispatchQueue.main.async { web.evaluateJavaScript(js, completionHandler: nil) }
@@ -187,16 +208,16 @@ final class NativeSpike: NSObject {
         // whether playback then resumes are different questions with opposite
         // fixes, and this project has already spent four rounds guessing which.
         c.playCommand.addTarget { [weak self] _ in
-            self?.log("spike-cmd-play"); self?.player?.play(); self?.publish(); return .success }
+            self?.log("spike-cmd-play"); self?.player?.play(); self?.after(nil); return .success }
         c.pauseCommand.addTarget { [weak self] _ in
-            self?.log("spike-cmd-pause"); self?.player?.pause(); self?.publish(); return .success }
+            self?.log("spike-cmd-pause"); self?.player?.pause(); self?.after(nil); return .success }
         // A Bluetooth button is one toggle — the web side learned this the hard
         // way, and the lesson carries over unchanged.
         c.togglePlayPauseCommand.addTarget { [weak self] _ in
             guard let p = self?.player else { return .commandFailed }
             self?.log("spike-cmd-toggle")
             p.rate > 0 ? p.pause() : p.play()
-            self?.publish(); return .success }
+            self?.after(nil); return .success }
         [c.playCommand, c.pauseCommand, c.togglePlayPauseCommand].forEach { $0.isEnabled = true }
     }
 
