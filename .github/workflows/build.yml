@@ -1,0 +1,67 @@
+# Builds an UNSIGNED .ipa on a hosted macOS runner.
+#
+# WHY THIS EXISTS: Xcode is macOS-only, but you do not need to OWN a Mac. This
+# runner exists for the ten minutes of the build and is destroyed after. On a
+# PUBLIC repository GitHub Actions is free, which is the whole reason this repo
+# is separate from the private music-box one — the shell holds no secrets.
+#
+# The .ipa is deliberately UNSIGNED. AltStore signs it with a free Apple ID on
+# the way onto the phone, and AltServer re-signs it before the 7-day free
+# provisioning certificate lapses. No $99/yr, no Mac, no Windows.
+name: build
+
+on:
+  push: { branches: [main] }
+  workflow_dispatch:
+
+jobs:
+  ipa:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Point the app at the real site
+        # The repo is public, so the hostname lives in a secret rather than in
+        # Info.plist. Without it the app builds and then says so on screen,
+        # rather than showing a blank webview.
+        env:
+          MB_APP_URL: ${{ secrets.MB_APP_URL }}
+        run: |
+          if [ -z "$MB_APP_URL" ]; then
+            echo "::warning::MB_APP_URL is not set — this build will not load anything."
+          else
+            /usr/libexec/PlistBuddy -c "Set :MBAppURL $MB_APP_URL" Resources/Info.plist
+            echo "::notice::MBAppURL set from secret (value not printed)"
+          fi
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: Archive (no code signing)
+        run: |
+          xcodebuild archive \
+            -project MusicBox.xcodeproj \
+            -scheme MusicBox \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath build/MusicBox.xcarchive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+
+      - name: Package as an unsigned .ipa
+        # An .ipa is just a zip with the .app inside Payload/. Going through
+        # `xcodebuild -exportArchive` would demand signing credentials we do
+        # not have and do not want.
+        run: |
+          mkdir -p Payload
+          cp -R build/MusicBox.xcarchive/Products/Applications/MusicBox.app Payload/
+          zip -qry MusicBox-unsigned.ipa Payload
+          ls -lh MusicBox-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MusicBox-unsigned-ipa
+          path: MusicBox-unsigned.ipa
+          retention-days: 30
