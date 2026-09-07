@@ -61,9 +61,13 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
       let session = AVAudioSession.sharedInstance()
       try session.setCategory(.playback, mode: .default)
       try session.setActive(true)
-    } catch {
-      NSLog("[MusicBox] AVAudioSession activate FAILED: \(error.localizedDescription) "
+    } catch let e as NSError {
+      NSLog("[MusicBox] AVAudioSession activate FAILED (\(e.code)): \(e.localizedDescription) "
             + "— background audio will not survive locking.")
+      // Named, and routed to the page: at launch the bridge does not exist yet
+      // so this is a no-op, but every later call (interruption end, media
+      // services reset) lands somewhere readable.
+      logToPage("activate-" + MediaBridge.reason(e.code))
     }
   }
 

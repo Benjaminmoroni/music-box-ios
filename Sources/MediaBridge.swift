@@ -143,9 +143,30 @@ final class MediaBridge: NSObject, WKScriptMessageHandler {
         do {
             try AVAudioSession.sharedInstance().setActive(true)
             log("reclaimed")
-        } catch {
-            log("reclaim-failed")
-            NSLog("[MusicBox] setActive on play FAILED: \(error.localizedDescription)")
+        } catch let e as NSError {
+            log("reclaim-" + MediaBridge.reason(e.code))
+            NSLog("[MusicBox] setActive on play FAILED (\(e.code)): \(e.localizedDescription)")
+        }
+    }
+
+    /// AVAudioSession errors are OSStatus four-character codes, and a bare
+    /// number is unreadable on the one screen that can show it. Only the ones
+    /// that mean something different to us are named; anything else keeps its
+    /// number so an unknown case is still identifiable rather than lumped in.
+    ///
+    /// `cannot-interrupt` is the one worth watching for: it means ANOTHER app
+    /// holds an active non-mixable session and a BACKGROUNDED app is not
+    /// allowed to take it. That would make this failure about the other app's
+    /// mere existence, not about anything we did — and it would be fixed by
+    /// force-quitting that app, not by more code here.
+    static func reason(_ code: Int) -> String {
+        switch code {
+        case 560557684: return "cannot-interrupt"      // '!int'
+        case 560030580: return "cannot-start-playing"  // '!pla'
+        case 561015905: return "cannot-start-record"   // '!rec'
+        case 560161140: return "bad-param"             // '-50'
+        case 561017449: return "session-not-active"    // '!ina'
+        default:        return "failed-\(code)"
         }
     }
 
