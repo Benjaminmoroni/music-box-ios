@@ -30,6 +30,41 @@ final class MediaBridge: NSObject, WKScriptMessageHandler {
     /// paused->playing EDGE rather than on every ladder rung.
     private var lastPlaying = false
 
+    /// WE GIVE THE SESSION UP; NOBODY TAKES IT (Ben, 2026-09-07).
+    ///
+    /// That correction is what this exists for. Measured: with a real pause we
+    /// release and another app has the slot within seconds — five
+    /// `sess-interrupted` in eight. With the hold we release nothing and NOTHING
+    /// interrupts us at all, yet resume still dies somewhere between 20 and 27
+    /// seconds. **A steal announces itself and that one never did**, so the
+    /// ceiling is not a rogue app; the session simply lapses under us because
+    /// `playbackRate = 0` renders NO SAMPLES and iOS reclaims a session nobody
+    /// is using.
+    ///
+    /// The page already tried to fix this at its own layer and could not:
+    /// mute-hold kept `rate 1` and muted, and lapsed identically, because
+    /// WebKit does not count a muted element as playing audio either. The shell
+    /// can do what the page cannot — render REAL silence through our own
+    /// session, which iOS does count.
+    private var keepAlive: AVAudioPlayer?
+    private var release: DispatchWorkItem?
+
+    /// Bounded, and the bound is the point (Ben): "give it a few minutes of
+    /// holding onto the session (maybe 5), and then ACTIVELY release it so that
+    /// it is clear that music-box is no longer resumable from the lock screen."
+    ///
+    /// Holding forever would make us the app everyone else's audio has to fight
+    /// — precisely the rudeness this whole investigation has been complaining
+    /// about from the other side. And an unbounded hold has no honest end
+    /// state: the widget keeps offering a play button that does nothing. A
+    /// deliberate release ends it cleanly instead of decaying into a lie.
+    private static let holdWindow: TimeInterval = 300
+
+    static var keepAliveEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "MBHoldSession") }
+        set { UserDefaults.standard.set(newValue, forKey: "MBHoldSession") }
+    }
+
     /// Persisted so the choice survives relaunch. The page owns the UI for it
     /// (Settings -> Native transport) and posts it down here.
     static var enabled: Bool {
@@ -51,6 +86,11 @@ final class MediaBridge: NSObject, WKScriptMessageHandler {
               let type = body["type"] as? String else { return }
 
         switch type {
+        case "keepalive":
+            let on = (body["enabled"] as? Bool) ?? false
+            MediaBridge.keepAliveEnabled = on
+            if !on { stopHolding() }
+
         case "transport":
             // The page's Settings toggle. Applying it live means no relaunch to
             // A/B it, which is the whole point of it being a switch.
@@ -71,7 +111,14 @@ final class MediaBridge: NSObject, WKScriptMessageHandler {
             // ladder per track, so acting on every message would call setActive
             // dozens of times a minute for nothing.
             let playing = (body["playing"] as? Bool) ?? false
-            if playing && !lastPlaying { reclaimSession() }
+            if playing != lastPlaying {
+                if playing {
+                    stopHolding()      // real audio is coming; silence is done
+                    reclaimSession()
+                } else {
+                    startHolding()     // paused: keep the session genuinely busy
+                }
+            }
             lastPlaying = playing
 
             guard MediaBridge.enabled else { return }
@@ -168,6 +215,80 @@ final class MediaBridge: NSObject, WKScriptMessageHandler {
         case 561017449: return "session-not-active"    // '!ina'
         default:        return "failed-\(code)"
         }
+    }
+
+    // MARK: - holding the session across a pause
+
+    private func startHolding() {
+        guard MediaBridge.keepAliveEnabled, keepAlive == nil else { return }
+        do {
+            // Zero-amplitude SAMPLES, not volume 0 and not muted — the
+            // distinction is the whole lesson from mute-hold. The audio unit
+            // has to actually render for iOS to count us as playing.
+            let p = try AVAudioPlayer(data: MediaBridge.silence())
+            p.numberOfLoops = -1
+            p.play()
+            keepAlive = p
+            log("holding")
+        } catch let e as NSError {
+            log("hold-" + MediaBridge.reason(e.code))
+            NSLog("[MusicBox] keep-alive FAILED (\(e.code)): \(e.localizedDescription)")
+        }
+        let work = DispatchWorkItem { [weak self] in self?.releaseSession() }
+        release = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + MediaBridge.holdWindow,
+                                      execute: work)
+    }
+
+    private func stopHolding() {
+        release?.cancel(); release = nil
+        guard keepAlive != nil else { return }
+        keepAlive?.stop(); keepAlive = nil
+        log("hold-ended")
+    }
+
+    /// The honest end of the window. Deactivating with
+    /// `.notifyOthersOnDeactivation` is what tells iOS and every other app that
+    /// we are done, so the lock screen stops offering a Music Box that cannot
+    /// come back — and the page is told too, so its own state stops claiming a
+    /// hold it no longer has.
+    private func releaseSession() {
+        release = nil
+        keepAlive?.stop(); keepAlive = nil
+        do {
+            try AVAudioSession.sharedInstance()
+                .setActive(false, options: .notifyOthersOnDeactivation)
+            log("released")
+        } catch let e as NSError {
+            log("release-" + MediaBridge.reason(e.code))
+        }
+        guard let web = webView else { return }
+        DispatchQueue.main.async {
+            web.evaluateJavaScript("window.__mbRelease && window.__mbRelease()",
+                                   completionHandler: nil)
+        }
+    }
+
+    /// One second of PCM zeroes, looped. Built rather than shipped as a
+    /// resource: a silent WAV is a header and a run of zeroes, and a binary
+    /// asset for that is one more thing the build can silently drop — which
+    /// this project has already been bitten by once.
+    private static func silence(seconds: Double = 1, rate: Int = 44_100) -> Data {
+        let frames = Int(Double(rate) * seconds)
+        let bytes = frames * 2                       // mono, 16-bit
+        func le(_ v: Int, _ n: Int) -> Data {
+            var x = UInt32(v).littleEndian
+            return Data(bytes: &x, count: n)
+        }
+        var d = Data("RIFF".utf8)
+        d.append(le(36 + bytes, 4)); d.append(Data("WAVEfmt ".utf8))
+        d.append(le(16, 4))                          // fmt chunk size
+        d.append(le(1, 2)); d.append(le(1, 2))       // PCM, mono
+        d.append(le(rate, 4)); d.append(le(rate * 2, 4))
+        d.append(le(2, 2)); d.append(le(16, 2))      // block align, bits
+        d.append(Data("data".utf8)); d.append(le(bytes, 4))
+        d.append(Data(count: bytes))
+        return d
     }
 
     /// Write into the page's diagnostics buffer, which is the only one readable
