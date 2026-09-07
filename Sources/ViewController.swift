@@ -117,35 +117,13 @@ final class ViewController: UIViewController, WKNavigationDelegate {
     view.addSubview(label)
   }
 
-  private var spikeButton: UIButton?
-
-  /// Deliberately ugly and deliberately in the way when it is on: a spike
-  /// control that blends in is one that gets left in the shipped app.
-  private func updateSpikeButton() {
-    if !NativeSpike.enabled {
-      spikeButton?.removeFromSuperview(); spikeButton = nil
-      return
-    }
-    guard spikeButton == nil, let root = view else { return }
-    let b = UIButton(type: .system)
-    b.setTitle("SPIKE ▶", for: .normal)
-    b.titleLabel?.font = .monospacedDigitSystemFont(ofSize: 13, weight: .bold)
-    b.backgroundColor = UIColor.systemRed.withAlphaComponent(0.85)
-    b.setTitleColor(.white, for: .normal)
-    b.layer.cornerRadius = 6
-    b.translatesAutoresizingMaskIntoConstraints = false
-    b.addTarget(self, action: #selector(startSpike), for: .touchUpInside)
-    root.addSubview(b)
-    NSLayoutConstraint.activate([
-      b.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor, constant: 4),
-      b.trailingAnchor.constraint(equalTo: root.safeAreaLayoutGuide.trailingAnchor, constant: -8),
-      b.heightAnchor.constraint(equalToConstant: 30),
-      b.widthAnchor.constraint(equalToConstant: 84),
-    ])
-    spikeButton = b
-  }
-
-  @objc private func startSpike() {
-    bridge.spikePlayer().start()
-  }
+  /// THE SPIKE BUTTON IS GONE (2026-09-07). It sat top-right, directly over the
+  /// settings gear — so it covered the switch that turns it off, and there was
+  /// no way back out of the mode from inside the app. A control that can hide
+  /// its own off switch is a trap however useful it was.
+  ///
+  /// It was phase 0 scaffolding: a way to play one track with nothing in the
+  /// web view competing. Phase 1 made it redundant, because the page itself now
+  /// drives the native player.
+  private func updateSpikeButton() {}
 }
