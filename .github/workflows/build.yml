@@ -66,6 +66,23 @@ jobs:
         run: |
           mkdir -p Payload
           cp -R build/MusicBox.xcarchive/Products/Applications/MusicBox.app Payload/
+          # AD-HOC SIGN BEFORE ZIPPING, and this is load-bearing for sideloading.
+          #
+          # CODE_SIGNING_ALLOWED=NO produces a Mach-O with NO LC_CODE_SIGNATURE
+          # load command at all. Sideloader copes (unsigned input is its whole
+          # purpose) but AltServer's ldid path REPLACES an existing signature
+          # and has nowhere to put one — the install reports success and the
+          # app is then killed at exec with `Launchd job spawn failed`,
+          # POSIX 85 ENEEDAUTH, and NO crash report, because the kernel refuses
+          # before any of our code runs. Diagnosed from the device console on
+          # 2026-09-14; every normal .ipa carries a signature, so this was our
+          # artifact being unusual rather than either signer being broken.
+          #
+          # `-s -` is ad-hoc: no identity, no secrets, no credentials in CI. It
+          # exists purely so the load command is there for a real signer to
+          # replace.
+          codesign --force --sign - --timestamp=none Payload/MusicBox.app
+          codesign -dv Payload/MusicBox.app 2>&1 | head -3
           zip -qry MusicBox-unsigned.ipa Payload
           ls -lh MusicBox-unsigned.ipa
 
